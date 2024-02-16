@@ -1,8 +1,6 @@
 #ifndef WIZARDRY_BUILD_H
 #define WIZARDRY_BUILD_H
 
-#ifndef RELEASE_BUILD
-
 #include<stdlib.h>
 #include<stdio.h>
 #include<stdarg.h>
@@ -12,9 +10,12 @@
 #include<string.h>
 #include<errno.h>
 #include<sys/wait.h>
+#include<time.h>
+#include<dlfcn.h>
 
+// NOTE: Replacement has been made
 // REPLACE ALL ASSERTS WITH OWN IMPLEMENTATION
-#include<assert.h>
+//#include<assert.h>
 
 // MEMORY
 // Just a scratch pad that gets malloc'ed
@@ -72,7 +73,8 @@ command_t command_init(const char* command, ...);
 void command_append_arg(command_t* command, command_t command_to_append);
 void command_execute(command_t command);
 
-// Welcome to macro land
+
+// NOTE: Welcome to macro land
 #define MAKE_CMD(...)\
     command_init(__VA_ARGS__, NULL)
 #define EXEC_CMD(COMMAND)\
@@ -87,36 +89,38 @@ do{\
     wiz_alloc_free_to_point();\
 }while(0)
 
-//TODO: Currently only operates on .c and .h
-//Need to make it possible to specify file formats(and wildcard)
-// NOTE: Little hacky with the mem pointer for reduced memory usage
-// Also using MAKE_CMD instead of CMD to not override free point
-#define CMD_FOR_FILE_IN_DIR(DIR_PATH, ...)\
-do{\
-    wiz_alloc_set_free_point();\
-    dir_t DIR = dir_init(DIR_PATH);\
-    command_t COMMAND = {0};\
-    void* ptr = NULL;\
-    for(size_t i = 0; i < DIR.len; i++)\
-    {\
-        ptr = memory_ptr;\
-        COMMAND = MAKE_CMD(__VA_ARGS__, DIR.files[i].file_path);\
-        EXEC_CMD(COMMAND);\
-        memory_ptr = ptr;\
-    }\
-    wiz_alloc_free_to_point();\
-    break;\
-}while(0)
-
-// Strictly for debugging wiz_build
-#define PRINT_CMD(COMMAND)\
-    for(size_t i = 0; i < COMMAND.len; i++)\
-    {\
-        fprintf(stderr, "%s ", COMMAND.args[i]);\
-    }
-
 #define BIN(BIN_NAME)\
     "/usr/bin/" BIN_NAME
+
+#define FILE_EXISTS(FILE_PATH)\
+({\
+    int RESULT = 0;\
+    FILE* FP = fopen(FILE_PATH, "r");\
+    if(FP == NULL)\
+    { RESULT = -1; }\
+    else\
+    { fclose(FP); }\
+    RESULT;\
+})
+#define MKDIR(...) CMD(BIN("mkdir"), __VA_ARGS__)
+#define TOUCH(...) CMD(BIN("touch"), __VA_ARGS__)
+#define MV(FROM, TO) CMD(BIN("bash"), "mv", FROM, TO)
+
+file_t compile_target;
+
+#define SET_COMPILE_TARGET(TARGET)\
+    TOUCH(TARGET);\
+    compile_target = file_init(TARGET)
+
+#define CHECK_COMPILE_STATUS()\
+{\
+    long LAST_MODIFY = compile_target.file_info.st_mtim.tv_nsec;\
+    file_update_stat(&compile_target);\
+    if(LAST_MODIFY == compile_target.file_info.st_mtim.tv_sec)\
+    {LOG("Compilation of " BLUE("%s") " has " RED("FAILED"), compile_target.file_path);}\
+    else\
+    {LOG("Compilation of " BLUE("%s") " has " GREEN("SUCCEEDED"), compile_target.file_path);}\
+}
 
 #define NULL_TERMINATOR 1
 
@@ -126,7 +130,6 @@ do{\
 
 #define STRCPY(DEST, SRC)\
     DEST = wiz_allocate(strlen(SRC) + NULL_TERMINATOR);\
-    assert(DEST != NULL);\
     (void)memcpy(DEST, SRC, strlen(SRC) + 1);
 
 #define STRCAT(DEST, SRC)\
@@ -145,9 +148,11 @@ do{\
     size_t LEN = strlen(STRING);\
     char* NEW_STR = wiz_allocate(LEN + NULL_TERMINATOR);\
     (void)memcpy(NEW_STR, STRING, LEN);\
+    NEW_STR[LEN] = '\0';\
     NEW_STR;\
 })
 
+// NOTE: Doesn't work
 #define COUNT_VA_ARGS(VA_LIST, FIRST)\
 {\
     size_t count = 0;\
@@ -157,6 +162,68 @@ do{\
     va_end(VA_LIST);\
     count;\
 }
+
+#define GET_FILE_FORMAT(FILE_NAME)\
+    file_get_format(FILE_NAME)
+
+// NOTE: FOR FILE IN DIR SECTION - don't use these macros outside a FOR_FILE_IN_DIR loop
+
+#define FILE_NAME CURRENT_FILE->d_name
+#define FILE_PATH STRCAT(DIR_PATH_ALLOC, FILE_NAME)
+
+#define WHERE(CONDITION) if ( CONDITION )
+
+#define STRCMP(STR1, STR2) strcmp(STR1, STR2) == 0
+#define FILE_FORMAT(FORMAT) STRCMP(file_get_format(STRDUP(CURRENT_FILE->d_name)), FORMAT)
+
+#define FILE_LAST_MODIFIED(FILE_PATH)\
+({\
+    file_t FILE_A = file_init(FILE_PATH);\
+    file_t FILE_B = file_init( STRCAT(DIR_PATH_ALLOC, CURRENT_FILE->d_name) );\
+    file_operations_t RESULT = file_compare_date(&FILE_A, &FILE_B);\
+    RESULT;\
+})
+#define FILE_OLDER_THAN(FILE_PATH) FILE_LAST_MODIFIED(FILE_PATH) == 0
+#define FILE_NEWER_THAN(FILE_PATH) FILE_LAST_MODIFIED(FILE_PATH) == 1
+
+#define FOR_FILE_IN_DIR(DIR_PATH, SORT_BY, ...)\
+({\
+    DIR* DIR = opendir(DIR_PATH);\
+    size_t FILES_MATCHED = 0;\
+    ASSERT(DIR != NULL);\
+    char* DIR_PATH_ALLOC = NULL;\
+    if(DIR_PATH[strlen(DIR_PATH)-1] != '/'){\
+    STRCPY(DIR_PATH_ALLOC, STRCAT(DIR_PATH, "/"));}\
+    else{\
+    STRCPY(DIR_PATH_ALLOC, DIR_PATH);}\
+    struct dirent *CURRENT_FILE = NULL;\
+    while((CURRENT_FILE = readdir(DIR)) != NULL)\
+    {\
+        if(CURRENT_FILE->d_name[0] == '.')\
+        {continue;}\
+        else if(CURRENT_FILE->d_type == DT_DIR)\
+        {continue;}\
+        SORT_BY \
+        {\
+            __VA_ARGS__;\
+            FILES_MATCHED++;\
+        }\
+    }\
+    FILES_MATCHED;\
+})
+
+
+//            COMMAND = MAKE_CMD(__VA_ARGS__, STRCAT(DIR_PATH_ALLOC, CURRENT_FILE->d_name));
+//            EXEC_CMD(COMMAND);
+// NOTE: END OF FOR FILE IN DIR SECTION
+
+// Strictly for debugging wiz_build
+#define PRINT_CMD(COMMAND)\
+    for(size_t i = 0; i < COMMAND.len; i++)\
+    {\
+        fprintf(stderr, "%s ", COMMAND.args[i]);\
+    }
+
 
 // LOGGING
 #define RESET_COLOR         "\033[0m"
@@ -194,7 +261,27 @@ do{\
     fprintf(stderr, FG_BRIGHT_RED "|WIZ-LOG| " RESET_COLOR __VA_ARGS__);\
     fprintf(stderr, "\n")
 
+#define ASSERT(expr)\
+    if(expr)\
+    {}\
+    else\
+    {\
+        PANIC(MAGENTA("EXPECT") "(" CYAN(#expr) ")" RED(" FAILED") " at: " BLUE(__FILE__) ":" YELLOW("%d"), __LINE__ );\
+    }
+
+#define TEST(expr)\
+    if(expr)\
+    {\
+        LOG(MAGENTA("TEST") "(" CYAN(#expr) ")" GREEN(" SUCCEEDED") " at: " BLUE(__FILE__) ":" YELLOW("%d"), __LINE__ );\
+    }\
+    else\
+    {\
+        WARN(MAGENTA("TEST") "(" CYAN(#expr) ")" RED(" FAILED") " at: " BLUE(__FILE__) ":" YELLOW("%d"), __LINE__ );\
+    }
+
 // wiz_build self-rebuild + alloc scratch
+#define WIZ_BUILD_INIT(ARGC, ARGV) wiz_build_init(ARGC, ARGV)
+#define WIZ_BUILD_DEINIT() wiz_build_deinit()
 void wiz_build_init(int argc, char **argv);
 void wiz_build_deinit();
 
@@ -207,8 +294,7 @@ void wiz_build_deinit();
 
 void* wiz_allocate(size_t size)
 {
-    // TODO: Replace with own implementation
-    assert((memory_ptr + size) <= (wiz_memory + (size_t)(MAX_MEMORY)));
+    ASSERT((memory_ptr + size) <= (wiz_memory + (size_t)(MAX_MEMORY)));
 
     void* alloc = memory_ptr;
     memory_ptr += size;
@@ -224,13 +310,14 @@ void wiz_alloc_reset()
     memory_ptr = wiz_memory;
 }
 
+// Allows for some freeing, significantly reduces overall peak memory usage
 void wiz_alloc_set_free_point()
 {
     free_point = memory_ptr;
 }
 void wiz_alloc_free_to_point()
 {
-    assert(free_point != NULL);
+    ASSERT(free_point != NULL);
     memory_ptr = free_point;
 }
 
@@ -242,10 +329,10 @@ file_t file_init(const char* file_path)
     void *alloc = NULL;
 
     result = stat(file_path, &new_file.file_info);
-    assert(result == 0);
+    ASSERT(result == 0);
 
     alloc = wiz_allocate(file_name_len);
-    assert(alloc != NULL);
+    ASSERT(alloc != NULL);
     new_file.file_path = alloc;
 
     (void)memcpy(alloc, file_path, file_name_len);
@@ -253,13 +340,14 @@ file_t file_init(const char* file_path)
     return new_file;
 }
 
+// File_path already allocated
 file_t file_init_stat_only(char* file_path)
 {
     file_t new_file = {0};
     int result = 0;
 
     result = stat(file_path, &new_file.file_info);
-    assert(result == 0);
+    ASSERT(result == 0);
 
     new_file.file_path = file_path;
 
@@ -282,9 +370,10 @@ file_compare_date(file_t* file_a, file_t* file_b)
 
 void file_update_stat(file_t* file)
 {
-    assert( stat(file->file_path, &file->file_info) == 0 );
+    ASSERT( stat(file->file_path, &file->file_info) == 0 );
 }
 
+// TODO: Handle cases where file doesn't have format
 char* file_get_format(char* file_path)
 {
     char* substr = strtok(file_path, ".");
@@ -296,6 +385,7 @@ char* file_get_format(char* file_path)
 }
 
 // TODO: Make it recursive and add file formats as argument
+// NOTE: Actually, might just scrap all of this(see FOR_FILE_IN_DIR macro)
 dir_t dir_init_wrapped(const char* dir_path)
 {
     dir_t new_dir = {0};
@@ -309,7 +399,7 @@ dir_t dir_init_wrapped(const char* dir_path)
 //    if(dir_path[strlen(dir_path)] != '/');
 
     new_dir.dir = opendir(dir_path);
-    assert(new_dir.dir != NULL);
+    ASSERT(new_dir.dir != NULL);
 
     while((current_file = readdir(new_dir.dir)) != NULL)
     {
@@ -337,7 +427,7 @@ dir_t dir_init_wrapped(const char* dir_path)
         }
     }
 
-    assert(closedir(new_dir.dir) == 0);
+    ASSERT(closedir(new_dir.dir) == 0);
     new_dir.len = files;
 
     return new_dir;
@@ -383,6 +473,7 @@ command_t command_init(const char* command, ...)
     return new_command;
 }
 
+// NOTE: Untested
 void command_append_arg(command_t* command, command_t command_to_append)
 {
     size_t args_buffer_size = 
@@ -415,31 +506,31 @@ void command_append_arg(command_t* command, command_t command_to_append)
 
 void command_execute(command_t command)
 {
-//    PRINT_CMD(command);
     pid_t pid = fork();
     int status = 0;
-    assert(pid >= 0);
+    ASSERT(pid >= 0);
 
     // Parent waits for child
     if(pid == 0)
     {
-        assert(execvp(command.command, command.args) != -1);
+        ASSERT(execvp(command.command, command.args) != -1);
         fprintf(stderr, "ERRNO: %s\n", strerror(errno));
     } 
     else{
-        // TODO: check for error
-        assert(waitpid(pid, &status, 0) >= 0);
+        ASSERT(waitpid(pid, &status, 0) >= 0);
     }
 }
 
 void wiz_build_init(int argc, char **argv)
 {
+    LOG("Running in debug mode");
     wiz_memory = malloc(MAX_MEMORY);
     max_alloc = 0;
-//     TODO: Replace with own implementation
-    assert(wiz_memory != NULL);
+
+    ASSERT(wiz_memory != NULL);
     memory_ptr = wiz_memory;
 
+    ASSERT(argc != 0);
     file_t bin_file = file_init(argv[0]);
     file_t src_file = file_init(STRCAT(argv[0], ".c"));
     
@@ -447,30 +538,37 @@ void wiz_build_init(int argc, char **argv)
 
     if(result == FILE_NEWER)
     {
-        long last_modified = bin_file.file_info.st_mtim.tv_sec;
+        long last_modified = bin_file.file_info.st_mtim.tv_nsec;
+        struct timespec begin, end;
 
         LOG("Changes in " BLUE("%s") " detected, " YELLOW("RECOMPILING..."), src_file.file_path);
-        CMD(BIN(COMPILER), "-g", src_file.file_path, "-o", argv[0]); 
+
+        clock_gettime(CLOCK_MONOTONIC_RAW, &begin);
+        CMD(BIN(COMPILER), DEBUG_FLAGS, src_file.file_path, "-o", argv[0]); 
+        clock_gettime(CLOCK_MONOTONIC_RAW, &end);
 
         file_update_stat(&bin_file); // If bin file hasn't been modified, then we'll assume the compilation failed
-        if(last_modified == bin_file.file_info.st_mtim.tv_sec)
+        if(last_modified == bin_file.file_info.st_mtim.tv_nsec)
         {
-            LOG("Compilation of " BLUE("%s") " has " RED("FAILED"), src_file.file_path);
+            LOG("Compilation of " BLUE("%s") " has " RED("FAILED") "\n", src_file.file_path);
             wiz_build_deinit();
         }else
         {
-            // TODO: Proper timer
-            LOG("Compilation of " BLUE("%s") " has " GREEN("SUCCEEDED") " in " MAGENTA("%ld") "s", src_file.file_path, last_modified - bin_file.file_info.st_mtim.tv_sec);
-            (void)execl(argv[0], argv[0]);
+            LOG("Compilation of " BLUE("%s") " has " GREEN("SUCCEEDED") " in " MAGENTA("%.4f") "s\n",
+                    src_file.file_path,
+                    (end.tv_nsec - begin.tv_nsec) / 1000000000.0 + (end.tv_sec - begin.tv_sec));
+            (void)execvp(argv[0], &argv[0]);
         }
-        //            (void)execvp(argv[0], argv[0]);
     }
     wiz_alloc_reset();
     // TEST DIR
+    /*
     dir_t dir_test = dir_init("./");
 
     LOG("File from dir reader test: " BLUE("%s") " found in dir", dir_test.files[0].file_path);
     LOG("File from dir reader test: " BLUE("%s") " found in dir", dir_test.files[1].file_path);
+    wiz_alloc_reset();
+*/
 }
 
 void wiz_build_deinit()
@@ -484,18 +582,5 @@ void wiz_build_deinit()
     exit(0);
 }
 
-#else /* RELEASE_BUILD */
-
-// Macros are defined to have a blank output.
-// This strips the program of any wiz_build function
-// TODO: wrap wiz_build_init in a macro and add it here
-// TODO: also add the other macros
-#define MAKE_CMD(...)
-#define CMD_APPEND(COMMAND, ...)
-#define CMD(...)
-#define PRINT_CMD(COMMAND)
-
-
-#endif /* RELEASE_BUID */
 
 #endif /* WIZARDRY_BUILD_H */
