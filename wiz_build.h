@@ -64,7 +64,7 @@ dir_t dir_init_wrapped(const char* dir_path);
 // SHELL COMMANDS
 typedef struct
 {
-    char* command;
+  //  char* command;
     char** args; // NOTE: args[0] == command, args come after, NULL terminated
     size_t len; // number of of args
 } command_t;
@@ -80,7 +80,7 @@ void command_execute(command_t command);
 #define EXEC_CMD(COMMAND)\
     command_execute(COMMAND)
 #define CMD_APPEND(COMMAND, ...)\
-    command_append_arg(COMMAND, MAKE_CMD(__VA_ARGS__), NULL)
+    command_append_arg(COMMAND, MAKE_CMD(__VA_ARGS__, NULL))
 #define CMD(...)\
 do{\
     wiz_alloc_set_free_point();\
@@ -126,6 +126,10 @@ file_t compile_target;
 
 #ifndef COMPILER
 #define COMPILER "clang"
+#endif
+
+#ifndef DEBUG_FLAGS
+#define DEBUG_FLAGS "-Wall", "-Wextra", "-g"
 #endif
 
 #define STRCPY(DEST, SRC)\
@@ -178,9 +182,11 @@ file_t compile_target;
 
 #define FILE_LAST_MODIFIED(FILE_PATH)\
 ({\
+    wiz_alloc_set_free_point();\
     file_t FILE_A = file_init(FILE_PATH);\
     file_t FILE_B = file_init( STRCAT(DIR_PATH_ALLOC, CURRENT_FILE->d_name) );\
     file_operations_t RESULT = file_compare_date(&FILE_A, &FILE_B);\
+    wiz_alloc_set_free_point();\
     RESULT;\
 })
 #define FILE_OLDER_THAN(FILE_PATH) FILE_LAST_MODIFIED(FILE_PATH) == 0
@@ -433,7 +439,6 @@ dir_t dir_init_wrapped(const char* dir_path)
     return new_dir;
 }
 
-
 command_t command_init(const char* command, ...)
 {
     command_t new_command = {0};
@@ -450,9 +455,10 @@ command_t command_init(const char* command, ...)
     // +1 to account for command also needing to be in args[0]
     // +1 to account for NULL terminator
     new_command.args = wiz_allocate(sizeof(char*) * (va_list_len + NULL_TERMINATOR + 1));
+//    new_command.command = wiz_allocate(sizeof(char*));
 
-    STRCPY(new_command.command, command);
     STRCPY(new_command.args[0], command);
+ //   new_command.command = new_command.args[0];
     new_command.len++;
 
     va_start(arguments, command);
@@ -480,26 +486,30 @@ void command_append_arg(command_t* command, command_t command_to_append)
         (command->len + command_to_append.len + NULL_TERMINATOR)
             * (sizeof(char*) );
 
+    size_t str_total_len = 0;
+
+    for(size_t i = 0; i < command->len; i++)
+        str_total_len += strlen(command->args[i]);
+
+    for(size_t i = 0; i < command_to_append.len; i++)
+        str_total_len += strlen(command_to_append.args[i]);
+
+    if((sizeof(char*)*3)+args_buffer_size + str_total_len + command == memory_ptr)
+        memory_ptr = command;
+
     char** args_buffer = wiz_allocate(args_buffer_size);
 
     for(size_t i = 0; i < command->len; i++)
     {
-        (void)memcpy(
-                args_buffer[i], 
-                command->args[i],
-                strlen(command->args[i])
-                );
+        STRCPY(args_buffer[i], command->args[i]);
     }
 
-    for(size_t i = 0; i <= command_to_append.len; i++)
+    for(size_t i = 0; i < command_to_append.len; i++)
     {
-        (void)memcpy(
-                command->args[command->len+i],
-                command_to_append.args[i], 
-                strlen(command_to_append.args[i])
-                );
+        STRCPY(args_buffer[command->len+i], command_to_append.args[i]);
     }
 
+    command->args = args_buffer;
     command->len += command_to_append.len;
     command->args[command->len] = NULL;
 }
@@ -513,7 +523,7 @@ void command_execute(command_t command)
     // Parent waits for child
     if(pid == 0)
     {
-        ASSERT(execvp(command.command, command.args) != -1);
+        ASSERT(execvp(command.args[0], command.args) != -1);
         fprintf(stderr, "ERRNO: %s\n", strerror(errno));
     } 
     else{
